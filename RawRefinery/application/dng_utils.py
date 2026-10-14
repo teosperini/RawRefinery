@@ -1,6 +1,70 @@
+import json
+import shutil
+import subprocess
 import numpy as np
 from pidng.core import RAW2DNG, DNGTags, Tag
 from pidng.defs import *
+
+EXIFTOOL_PATHS = ("/opt/homebrew/bin/exiftool", "/usr/local/bin/exiftool", "/usr/bin/exiftool")
+
+
+def find_exiftool():
+    """exiftool path, also when the app is started without the shell PATH (e.g. from the Dock)."""
+    found = shutil.which("exiftool")
+    if found:
+        return found
+    return next((p for p in EXIFTOOL_PATHS if shutil.which(p)), None)
+
+
+def _default_crop(source_path, dng_path, exiftool):
+    """DefaultCropOrigin/Size so the DNG shows the same area as the original file.
+
+    The DNG holds the whole visible raw area, including a few masked border pixels.
+    """
+    try:
+        import rawpy
+        out = subprocess.run(
+            [exiftool, "-json", "-n", "-ImageWidth", "-ImageHeight", "-SensorLeftBorder", "-SensorTopBorder",
+             source_path, dng_path], capture_output=True, text=True, check=True).stdout
+        src, dng = json.loads(out)
+        crop_w, crop_h = src["ImageWidth"], src["ImageHeight"]
+        dng_w, dng_h = dng["ImageWidth"], dng["ImageHeight"]
+        if crop_w >= dng_w and crop_h >= dng_h:
+            return None
+        if "SensorLeftBorder" in src and "SensorTopBorder" in src:
+            with rawpy.imread(source_path) as raw:
+                left = src["SensorLeftBorder"] - raw.sizes.left_margin
+                top = src["SensorTopBorder"] - raw.sizes.top_margin
+        else:
+            left, top = (dng_w - crop_w) // 2, (dng_h - crop_h) // 2
+        if left < 0 or top < 0 or left + crop_w > dng_w or top + crop_h > dng_h:
+            left, top = (dng_w - crop_w) // 2, (dng_h - crop_h) // 2
+        return left, top, min(crop_w, dng_w), min(crop_h, dng_h)
+    except Exception:
+        return None
+
+
+def copy_metadata(source_path, dng_path):
+    """Copy every metadata tag (EXIF, GPS, XMP, maker notes, dates...) from the original file into the DNG.
+
+    Returns (ok, message). The DNG is only modified in place by exiftool, never the source.
+    """
+    exiftool = find_exiftool()
+    if exiftool is None:
+        return False, "exiftool not found (brew install exiftool): metadata not copied"
+    cmd = [exiftool, "-overwrite_original", "-TagsFromFile", source_path, "-all:all", "--Orientation"]
+    crop = _default_crop(source_path, dng_path, exiftool)
+    if crop:
+        left, top, width, height = crop
+        cmd += [f"-IFD0:DefaultCropOrigin={left} {top}", f"-IFD0:DefaultCropSize={width} {height}"]
+    cmd.append(dng_path)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"metadata not copied: {e}"
+    if result.returncode != 0 or "1 image files updated" not in result.stdout:
+        return False, f"metadata not copied: {(result.stderr or result.stdout).strip()[:200]}"
+    return True, "metadata copied from original"
 
 def get_ratios(string, rh):
     return [x.as_integer_ratio() for x in rh.full_metadata[string].values]
@@ -140,6 +204,8 @@ def to_dng(uint_img, rh, filepath, ccm1, save_cfa=True, convert_to_cfa=True, use
     try:
       t.set(Tag.Make, rh.full_metadata['Image Make'].values)
       t.set(Tag.Model, rh.full_metadata['Image Model'].values)
+      # Lets Lightroom match its camera profile, otherwise colors come out generic (yellowish)
+      t.set(Tag.UniqueCameraModel, str(rh.full_metadata['Image Model'].values))
       t.set(Tag.Orientation, rh.full_metadata['Image Orientation'].values[0])
       exposures = get_ratios('EXIF ExposureTime', rh)
       fnumber = get_ratios('EXIF FNumber', rh)
@@ -153,8 +219,7 @@ def to_dng(uint_img, rh, filepath, ccm1, save_cfa=True, convert_to_cfa=True, use
       t.set(Tag.PhotographicSensitivity, rh.full_metadata['EXIF ISOSpeedRatings'].values)
     except:
       print("Could not save EXIF")
-    t.set(Tag.DNGVersion, DNGVersion.V1_4)
-    t.set(Tag.DNGBackwardVersion, DNGVersion.V1_2)
+    # PiDNG already writes DNGVersion / DNGBackwardVersion; setting them again duplicates the tags
     t.set(Tag.PreviewColorSpace, PreviewColorSpace.Adobe_RGB)
 
     r = RAW2DNG()

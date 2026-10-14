@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from RawHandler.RawHandler import RawHandler
 from blended_tiling import TilingModule
 from colour_demosaicing import demosaicing_CFA_Bayer_Malvar2004
-from RawRefinery.application.dng_utils import convert_color_matrix, to_dng
+from RawRefinery.application.dng_utils import convert_color_matrix, to_dng, copy_metadata
 from RawRefinery.application.postprocessing import match_colors_linear
 from RawRefinery.application.utils import can_use_gpu
 
@@ -179,6 +179,7 @@ class ModelController(QObject):
 
         self.model = None
         self.rh = None
+        self.source_path = None
         self.iso = 100
         self.colorspace = 'lin_rec2020'
 
@@ -204,6 +205,7 @@ class ModelController(QObject):
     def load_rh(self, path):
         """Loads the raw file handler"""
         self.rh = RawHandler(path, colorspace=self.colorspace)
+        self.source_path = str(path)
         if 'EXIF ISOSpeedRatings' in self.rh.full_metadata:
             self.iso = int(self.rh.full_metadata['EXIF ISOSpeedRatings'].values[0])
         else:
@@ -329,8 +331,19 @@ class ModelController(QObject):
 
     def generate_thumbnail(self, size=400):
         if not self.rh: return None
-        thumb = self.rh.generate_thumbnail(min_preview_size=size, clip=True)
-        return thumb
+        # Average (bin) the Bayer planes instead of subsampling them, and clip only at
+        # display time: clipping the black-subtracted noise first lifts the shadows.
+        mosaic = self.rh.apply_colorspace_transform(colorspace=None, clip=False)[0]
+        k = max(1, min(mosaic.shape) // 2 // size)
+
+        def bin_plane(plane):
+            h, w = plane.shape[0] - plane.shape[0] % k, plane.shape[1] - plane.shape[1] % k
+            return plane[:h, :w].reshape(h // k, k, w // k, k).mean(axis=(1, 3))
+
+        r = bin_plane(mosaic[0::2, 0::2])
+        g = (bin_plane(mosaic[0::2, 1::2]) + bin_plane(mosaic[1::2, 0::2])) / 2
+        b = bin_plane(mosaic[1::2, 1::2])
+        return np.stack([r, g, b], axis=-1).astype(np.float32)
 
     def _verify_model(self, dest_path, sig_path):
         try:
@@ -402,10 +415,11 @@ class ModelController(QObject):
         CCM = np.linalg.inv(CCM)
 
         transformed = denoised @ transform_matrix.T
-        uint_img = np.clip(transformed * 2**16-1, 0, 2**16-1).astype(np.uint16)
+        uint_img = np.clip(transformed * (2**16 - 1), 0, 2**16 - 1).astype(np.uint16)
         ccm1 = convert_color_matrix(CCM)
         to_dng(uint_img, self.rh, self.filename, ccm1, save_cfa=self.save_cfa, convert_to_cfa=True)
-        delta_time = perf_counter() - self.start_time 
-        self.save_finished.emit(f"Done in {delta_time:.1f} seconds.")
+        ok, meta_msg = copy_metadata(self.source_path, self.filename)
+        delta_time = perf_counter() - self.start_time
+        self.save_finished.emit(f"Done in {delta_time:.1f} seconds. {Path(self.filename).name}: {meta_msg}")
 
 
