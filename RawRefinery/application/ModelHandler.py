@@ -158,11 +158,29 @@ class InferenceWorker(QObject):
             # Post-process blending
             blend_alpha = self.conditioning[1] / 100
             final_denoised = (denoised_img * (1 - blend_alpha)) + (img * blend_alpha)
+            final_denoised = keep_clipped_highlights(img, final_denoised)
             
             self.finished.emit(img, final_denoised)
             
         except Exception as e:
             self.error.emit(str(e))
+
+def keep_clipped_highlights(img, denoised, threshold=0.99, grow=3, feather=2):
+    """Put the original back where it is clipped.
+
+    The network lowers saturated pixels (and not all channels by the same amount), so the highlights no longer
+    clip together and come out tinted, usually pink. Clipped pixels carry no noise to remove, so around them the
+    original is kept: a mask of the pixels with any channel at the clip level, grown by `grow` pixels and softened
+    by `feather` pixels so there is no visible edge.
+    """
+    clipped = torch.from_numpy((img.max(axis=2) >= threshold).astype(np.float32))[None, None]
+    if clipped.sum() == 0:
+        return denoised
+    mask = torch.nn.functional.max_pool2d(clipped, 2 * grow + 1, stride=1, padding=grow)
+    mask = torch.nn.functional.avg_pool2d(mask, 2 * feather + 1, stride=1, padding=feather, count_include_pad=False)
+    mask = mask[0, 0].numpy()[..., None]
+    return denoised * (1 - mask) + img * mask
+
 
 class ModelController(QObject):
     """
