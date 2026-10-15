@@ -4,6 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python version](https://img.shields.io/pypi/pyversions/rawrefinery.svg)](https://pypi.org/project/rawrefinery/)
 
+> **This is a fork.** It is based on [RawRefinery](https://github.com/rymuelle/RawRefinery) by rymuelle (MIT licence, see `LICENSE`) and adds: a redesigned window with batch mode and an event log, complete metadata copy into the denoised DNG (exiftool), a headless command line (`rawrefinery-cli`, used by [Fotofficina](https://github.com/teosperini/fotofficina)), and keeping clipped highlights from the original. The models and the original work are theirs; this fork is not affiliated with the original project.
+
 **RawRefinery** is an open-source application for **raw image quality refinement and denoising**.
 
 Currently in **alpha release**, RawRefinery provides a high-quality raw image denoising tool that works directly on most Bayer image formats, including those from **Canon, Nikon, and Sony** cameras.
